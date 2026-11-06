@@ -31,13 +31,22 @@ const lerp = (a, b, t) => a + (b - a) * t;
 const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 
 /* ---------------- dunes (shared with the shader) ---------------- */
-const bmp = (u, c, wl, wr) => { const d = (u - c) / (u < c ? wl : wr); return Math.exp(-d * d); };
-const hBack = u => .092 + .05 * bmp(u, .05, .16, .07) + .042 * bmp(u, .9, .2, .09) + .02 * bmp(u, .66, .1, .05) + .006 * Math.sin(u * 23 + 1);
-const hFront = u => .052 + .03 * bmp(u, .3, .36, .3) + .012 * bmp(u, .8, .2, .15) + .004 * Math.sin(u * 13 + .4);
+// four ranges of sand dunes, far to near: sharp crests, broad troughs
+const ridge = (u, f, ph) => { const x = u * f + ph; const v = .5 + .5 * Math.sin(x + .75 * Math.sin(x)); return Math.pow(v, 1.4) * (.75 + .25 * Math.sin(x * .37 + ph * 2)); };
+const duneH = (i, u) =>
+  i === 0 ? .112 + .03 * ridge(u, 15, 1.3) * (.7 + .3 * Math.sin(u * 3.1 + .4)) :
+  i === 1 ? .086 + .056 * ridge(u, 8.5, 4.1) * (.65 + .35 * Math.sin(u * 2.3 + 2)) :
+  i === 2 ? .05 + .072 * ridge(u, 5.2, 2.2) * (.6 + .4 * Math.sin(u * 1.7 + 5)) :
+            .008 + .082 * ridge(u, 3.1, .7) * (.7 + .3 * Math.sin(u * 1.3 + 1));
+const duneTop = u => Math.max(duneH(0, u), duneH(1, u), duneH(2, u), duneH(3, u));
 const GLSL_DUNES = `
-float bmp(float u,float c,float wl,float wr){float d=(u-c)/(u<c?wl:wr);return exp(-d*d);}
-float hBack(float u){return .092+.05*bmp(u,.05,.16,.07)+.042*bmp(u,.9,.2,.09)+.02*bmp(u,.66,.1,.05)+.006*sin(u*23.+1.);}
-float hFront(float u){return .052+.03*bmp(u,.3,.36,.3)+.012*bmp(u,.8,.2,.15)+.004*sin(u*13.+.4);}
+float ridge(float u,float f,float ph){ float x=u*f+ph; float v=.5+.5*sin(x+.75*sin(x)); return pow(v,1.4)*(.75+.25*sin(x*.37+ph*2.)); }
+float duneH(int i,float u){
+  if(i==0) return .112+.03*ridge(u,15.,1.3)*(.7+.3*sin(u*3.1+.4));
+  if(i==1) return .086+.056*ridge(u,8.5,4.1)*(.65+.35*sin(u*2.3+2.));
+  if(i==2) return .05+.072*ridge(u,5.2,2.2)*(.6+.4*sin(u*1.7+5.));
+  return .008+.082*ridge(u,3.1,.7)*(.7+.3*sin(u*1.3+1.));
+}
 `;
 const GLSL_COMMON = `
 vec3 hue(float h){ return .5+.5*cos(6.2832*(h+vec3(0.,.33,.67))); }
@@ -79,26 +88,25 @@ vec3 lights(vec2 q, float k){
   for(int i=0;i<4;i++){ vec2 d=q-uL[i].xy; c+=uLC[i]*uL[i].w*exp(-dot(d,d)/(uL[i].z*uL[i].z*k)); }
   return c;
 }
-float dune(float u, bool front){ return front? hFront(u):hBack(u); }
-vec3 duneCol(float u, float yb, bool front){
-  float h=dune(u,front)*uRes.y, e=.002;
-  float sl=(dune(u+e,front)-dune(u-e,front))/(2.*e)*uRes.y/uRes.x;
-  vec2 n=normalize(vec2(-sl*5.,1.));
-  float lam=clamp(dot(n,normalize(vec2(.6,.8)))*1.25-.2,0.,1.);
+vec3 duneCol(int i, float u, float yb){
+  float fi=float(i)/3.;                         // 0 far .. 1 near
+  float h=duneH(i,u)*uRes.y;
   float dep=(h-yb)/uRes.y;
-  vec3 c;
-  if(front){
-    c=mix(vec3(.15,.2,.31),vec3(.6,.67,.8),lam);
-    c*=mix(1.,.42,smoothstep(0.,.075,dep));
-    c*=.8+.3*u;
-    c+=vec3(.12,.15,.22)*exp(-(h-yb)*.35);
-  } else {
-    c=mix(vec3(.07,.11,.22),vec3(.31,.41,.62),lam);
-    c*=mix(1.,.55,smoothstep(0.,.06,dep));
-    c*=.75+.35*u;
-    c+=vec3(.1,.14,.24)*exp(-(h-yb)*.6);
-  }
-  return c;
+  // the light/shadow line runs from the crest diagonally down the face
+  float us=u+dep*(.35+.25*fi)*uRes.y/uRes.x, e=.0015;
+  float sl=(duneH(i,us+e)-duneH(i,us-e))/(2.*e)*uRes.y/uRes.x;
+  float lam=smoothstep(-.22,.28,-sl);
+  vec3 lit=mix(vec3(.3,.4,.6),vec3(.64,.7,.83),fi), shd=mix(vec3(.15,.23,.42),vec3(.2,.26,.42),fi);
+  vec3 c=mix(shd,lit,lam);
+  c*=mix(1.,.8,smoothstep(0.,.1,dep));
+  c*=.82+.28*u;                                  // horizon glow on the right
+  // wind ripples on the sunlit faces, finer in the distance
+  float rp=sin((yb*(1.4-fi*.7)+14.*sin(u*(30.-fi*14.)+float(i)*2.)+u*uRes.x*.12));
+  c*=1.+rp*.02*lam*fi*fi;
+  c+=vec3(.12,.15,.22)*exp(-(h-yb)*(1.2-fi*.6))*lam*.5;    // soft rim along lit crests
+  c*=.95+.1*h12(floor(gl_FragCoord.xy));                   // sand grain
+  vec3 haze=vec3(.11,.21,.42);
+  return mix(c,haze,(1.-fi)*.45);
 }
 void main(){
   vec2 q=vec2(gl_FragCoord.x/uDpr, uRes.y-gl_FragCoord.y/uDpr);   // css px, y down
@@ -126,13 +134,15 @@ void main(){
     o=vec4(c+dith,1);
   } else {
     float yb=uRes.y-q.y;
-    float hb=hBack(u)*uRes.y, hf=hFront(u)*uRes.y;
-    float af=clamp(hf-yb+.5,0.,1.), ab=clamp(hb-yb+.5,0.,1.);
-    float a=max(af,ab);
+    vec3 c=vec3(0); float a=0., top=0.;
+    for(int i=3;i>=0;i--){
+      float h=duneH(i,u)*uRes.y; top=max(top,h);
+      float ai=clamp(h-yb+.5,0.,1.)*(1.-a);
+      if(ai>0.) { c+=duneCol(i,u,yb)*ai; a+=ai; }
+    }
     if(a<=0.) discard;
-    vec3 c=mix(duneCol(u,yb,false),duneCol(u,yb,true),af);
-    c+=lights(vec2(q.x,uRes.y-max(hb,hf)),4.)*.14*mix(1.,.5,af);
-    o=vec4((c+dith)*a,a);
+    c+=lights(vec2(q.x,uRes.y-top),4.)*.12*a;
+    o=vec4(c+dith*a,a);
   }
 }`);
 
@@ -178,7 +188,7 @@ void main(){
   float sp=(vSp*.6+vFl*.9)*(vSt==9?.25:1.);
   float len=.3/(1.+vFl*.6+vSp*.8);
   float s;
-  if(vSt==3||vSt==10){                       // frost & crystal: six-point
+  if(vSt==3||vSt==10||vSt==15){             // frost, crystal, snow: six-point
     vec2 a=mat2(.5,.866,-.866,.5)*q, b=mat2(.5,-.866,.866,.5)*q;
     s=(exp(-abs(q.y)*2.4)*exp(-abs(q.x)*len)+exp(-abs(a.y)*2.4)*exp(-abs(a.x)*len)+exp(-abs(b.y)*2.4)*exp(-abs(b.x)*len))*.8;
   } else {
@@ -189,7 +199,6 @@ void main(){
   float edge=1.-smoothstep(.7,1.,max(abs(vC.x),abs(vC.y)));
   float I=(core*1.3+halo+sp*s*.5)*vI*edge;
   vec3 col=vCol;
-  if(vSt==2) col=mix(col,hue(uTime*.15+vSeed),.3*vSp);          // bokeh: faint colour play
   if(vSt==10) col=mix(col,hue(atan(q.y,q.x)/6.283+uTime*.1),.25*(vSp+vFl)*(1.-core));
   col=mix(col,vec3(1),core*.55);
   o=vec4(col*I,0);
@@ -215,7 +224,7 @@ void main(){
   float r=length(vUv);
   if(r>1.) discard;
   float m=mix(.35,1.,uOn);
-  vec2 s=vUv/(.62*m);
+  vec2 s=vUv/(.5*m);
   float rr=length(s), an=atan(s.y,s.x);
   float core=exp(-rr*rr*16.);
   float glow=exp(-rr*3.)*.35;
@@ -225,9 +234,13 @@ void main(){
     c=vec3(1.,.85,.55)*(rays(s,4.,60.,.75,0.)*1.1+core)+vec3(.75,.65,1.)*glow*1.6;
   } else if(uStyle==1){ // chrysanthemum: many fine warm rays
     c=vec3(1.,.72,.45)*(rays(s,12.,26.,.42,t*.05)*.8+rays(s,4.,80.,.8,0.)*.7+glow*1.4)+core;
-  } else if(uStyle==2){ // bokeh: rainbow ring
-    float ring=exp(-pow((rr-.5)*9.,2.));
-    c=hue(an/6.283+t*.1)*ring*.8+tint*glow*1.2+core+vec3(.9)*rays(s,4.,70.,.6,0.)*.6;
+  } else if(uStyle==2||uStyle==17||uStyle==20){ // falling rain in gold / blue / purple
+    vec3 rc=uStyle==2?vec3(1.,.8,.45):uStyle==17?vec3(.5,.7,1.):vec3(.75,.5,1.);
+    float dr=0.;
+    for(int i=0;i<6;i++){ float fi=float(i), x0=(fi-2.5)*.15+.03*sin(fi*7.);
+      float ln=exp(-pow((s.x-x0)*28.,2.))*step(0.,s.y)*exp(-s.y*(1.6+fi*.3));
+      dr+=ln*(.45+.55*pow(.5+.5*sin(s.y*14.-t*5.+fi*2.),4.)); }
+    c=rc*(dr*.9+glow*1.5+rays(s,4.,70.,.6,0.)*.7)+core;
   } else if(uStyle==3){ // frost: sharp six-point
     c=vec3(.7,.85,1.)*(rays(s,6.,90.,.9,0.)*1.2+rays(s,6.,30.,.32,.5236)*.35+glow*1.2)+core;
   } else if(uStyle==4){ // feathers: soft, downy
@@ -251,6 +264,36 @@ void main(){
     float hx=max(abs(s.x)*.866+abs(s.y)*.5,abs(s.y));
     float facet=.75+.25*sign(sin(an*3.));
     c=vec3(.7,.95,1.)*smoothstep(.34,.3,hx)*facet*.8+hue(an/6.283+t*.1)*rays(s,6.,70.,.85,0.)*.9+core+glow*vec3(.6,.9,1.);
+  } else if(uStyle==12){ // saturn: tilted ring
+    vec2 rs=mat2(.95,-.31,.31,.95)*s;
+    float e=length(vec2(rs.x,rs.y/.28));
+    float ring=exp(-pow((e-.62)*8.,2.))*(rs.y>0.||e>.75?1.:.25);
+    c=vec3(1.,.85,.6)*(ring*.8+glow*1.3)+core;
+  } else if(uStyle==13){ // heart
+    vec2 h=vec2(abs(s.x),s.y)*.9+vec2(0.,.45);
+    float d=h.y+h.x>1.? length(h-vec2(.25,.75))-.3536 : sqrt(min(dot(h-vec2(0,1),h-vec2(0,1)),dot(h-.5*max(h.x+h.y,0.),h-.5*max(h.x+h.y,0.))))*sign(h.x-h.y);
+    c=vec3(1.,.5,.65)*exp(-max(d,0.)*7.)*.7+core;
+  } else if(uStyle==14){ // butterflies: two soft fluttering wings
+    float fl=.75+.25*sin(t*7.);
+    vec2 q=vec2(abs(s.x)/fl,s.y);
+    float w=exp(-dot((q-vec2(.3,-.1))/vec2(.26,.3),(q-vec2(.3,-.1))/vec2(.26,.3)))+.7*exp(-dot((q-vec2(.22,.22))/vec2(.17,.17),(q-vec2(.22,.22))/vec2(.17,.17)));
+    c=vec3(.65,.78,1.)*w*.7+core;
+  } else if(uStyle==15){ // snowflake: six fine arms
+    c=vec3(.85,.95,1.)*(rays(s,6.,160.,.8,0.)*1.2+rays(s,6.,50.,.25,.5236)*.35+glow)+core;
+  } else if(uStyle==16){ // fireflies: little blinking lights
+    c=vec3(.8,1.,.5)*(glow*1.2)+core*vec3(1.,1.,.8);
+    for(int i=0;i<5;i++){ float fi=float(i);
+      vec2 ps=.48*vec2(cos(t*.5+fi*1.3),sin(t*.7+fi*2.1));
+      c+=vec3(.85,1.,.45)*exp(-dot(s-ps,s-ps)*140.)*(.5+.5*sin(t*2.5+fi*1.7)); }
+  } else if(uStyle==18){ // galaxy: spiral arms
+    float arms=pow(.5+.5*cos(3.*an-rr*7.+t*.4),3.);
+    c=mix(vec3(.6,.5,1.),vec3(1.,.7,.9),rr)*arms*exp(-rr*2.)*.9+core+glow*vec3(.7,.6,1.);
+  } else if(uStyle==19){ // crackle: flickering sparks
+    c=vec3(1.,.9,.6)*glow+core;
+    float ft=floor(t*9.);
+    for(int i=0;i<7;i++){ float fi=float(i);
+      vec2 ps=(vec2(h12(vec2(fi,ft)),h12(vec2(ft,fi+3.)))-.5)*1.3;
+      c+=vec3(1.,.95,.8)*exp(-dot(s-ps,s-ps)*220.)*step(.4,h12(vec2(fi*7.,ft))); }
   } else {              // water: ripples
     float rp=(.5+.5*sin(rr*20.-t*3.))*exp(-rr*2.4);
     c=vec3(.4,.8,1.)*(rp*.7+glow*1.5)+core+vec3(.7,.9,1.)*rays(s,4.,50.,.45,0.)*.4;
@@ -314,15 +357,19 @@ void main(){
     g=fill*.95+exp(-max(d,0.)*11.)*.5+exp(-r*r*16.)*.7;
     c=mix(c,vec3(1),exp(-r*r*10.)*.85);
   } else if(s<3.5){              // paper confetti
-    float fill=(1.-smoothstep(.88,.97,abs(p.x)))*(1.-smoothstep(.9,.99,abs(p.y)));
+    // rough, slightly torn edges
+    float ex=.9+.05*(vnoise(vec2(p.y*9.,vSeed*50.))-.5), ey=.92+.05*(vnoise(vec2(p.x*9.,vSeed*70.))-.5);
+    float fill=(1.-smoothstep(ex-.03,ex,abs(p.x)))*(1.-smoothstep(ey-.03,ey,abs(p.y)));
     float grain=vnoise(p*vec2(9.,14.)+vSeed*40.)*.5+vnoise(p*vec2(30.,45.)+vSeed*17.)*.5;
-    float fib=.5+.5*sin(p.y*50.+p.x*9.+vSeed*30.+grain*4.);
-    float side=vFlip>0.?1.:.7;
-    float curl=.12*p.y*sign(vFlip);
-    float shd=(.5+.5*abs(vFlip))+curl;
-    c=c*side*shd*(.86+.14*grain)*(.97+.03*fib);
-    c+=vec3(.06)*pow(abs(vFlip),8.);
-    a=fill*.97; g=0.;
+    float fine=h12(floor((p+1.)*vec2(40.,60.))+vSeed*91.);
+    float fib=pow(.5+.5*sin(p.y*70.+p.x*12.+vSeed*30.+grain*6.),6.);
+    float fold=p.x*.8+p.y*.6+(vSeed-.5)*.8;                     // a soft crease
+    float side=vFlip>0.?1.:.72;
+    float curl=.14*p.y*sign(vFlip);
+    float shd=(.48+.52*abs(vFlip))+curl+(fold>0.?.06:-.06)*abs(vFlip);
+    c=c*side*shd*(.8+.2*grain)*(.94+.06*fine)*(1.-.07*fib);
+    c*=.9+.1*smoothstep(.0,.04,abs(fold));
+    a=fill; g=0.;
   } else if(s<4.5){              // crystal gem (diamond)
     float d=abs(p.x)+abs(p.y);
     float fill=1.-smoothstep(.88,1.,d);
@@ -446,7 +493,48 @@ void main(){
     float hl=exp(-dot(h-vec2(cxh+.3,-.35),h-vec2(cxh+.3,-.35))*22.);
     c=mix(c,vec3(.92,.98,1.),.35);
     a=fill*.3; g=fill*.22+rim*.6+hl*1.3;
-  } else {                       // ripple ring
+  } else if(s<18.5){             // ripple ring
+    g=exp(-pow((r-.82)*10.,2.))*.7*(1.-smoothstep(.95,1.,r));
+  } else if(s<19.5){             // butterfly (flaps via quad width)
+    vec2 q=vec2(abs(p.x),p.y);
+    float up=length((q-vec2(.47,-.24))/vec2(.5,.44));
+    float lo=length((q-vec2(.33,.36))/vec2(.33,.32));
+    float body=step(q.x,.07)*step(abs(p.y),.62);
+    float wing=max(1.-smoothstep(.92,1.,up),1.-smoothstep(.9,1.,lo));
+    float fill=max(wing,body);
+    float vein=.85+.15*sin(atan(q.y+.1,q.x)*9.);
+    vec3 wc=c*vein*mix(1.,.55,smoothstep(.55,1.,min(up,lo)));
+    wc+=vec3(.25)*exp(-dot(q-vec2(.55,-.3),q-vec2(.55,-.3))*40.);
+    c=mix(wc,c*.25,body)*(.75+.3*abs(vFlip));
+    a=fill*.92; g=wing*.18;
+  } else if(s<20.5){             // snowflake
+    float an=atan(p.y,p.x)+vSeed*6.283, sec=1.0472;
+    float a2=mod(an+sec*.5,sec)-sec*.5;
+    vec2 q=r*vec2(cos(a2),abs(sin(a2)));
+    float arm=exp(-q.y*q.y*700.)*step(q.x,.92);
+    vec2 b=q-vec2(.48,0.); float pr=b.x*.5+b.y*.866;
+    float br=exp(-pow(b.x*.866-b.y*.5,2.)*700.)*step(0.,pr)*step(pr,.3);
+    vec2 b2=q-vec2(.72,0.); float pr2=b2.x*.5+b2.y*.866;
+    float br2=exp(-pow(b2.x*.866-b2.y*.5,2.)*700.)*step(0.,pr2)*step(pr2,.17);
+    float hex=1.-smoothstep(.12,.16,max(q.x, q.x*.5+q.y*.866));
+    g=clamp(arm+br+br2+hex*.8,0.,1.)+exp(-r*r*7.)*.15;
+    c=mix(c,vec3(1),.4);
+  } else if(s<21.5){             // soap bubble
+    float fill=1.-smoothstep(.95,1.,r);
+    float rim=smoothstep(.72,.96,r)*fill;
+    vec3 film=hue(r*1.4+vFlip*.2+vSeed+p.y*.35);
+    float hl=exp(-dot(p-vec2(-.38,-.42),p-vec2(-.38,-.42))*28.);
+    c=mix(film,vec3(1),.35);
+    a=fill*.06; g=rim*.75+hl*1.1+fill*.04;
+  } else if(s<22.5){             // heart
+    vec2 h=vec2(abs(p.x),-p.y)*.62+vec2(0.,.5);
+    float d;
+    if(h.y+h.x>1.) d=length(h-vec2(.25,.75))-.3536;
+    else d=sqrt(min(dot(h-vec2(0,1),h-vec2(0,1)),dot(h-.5*max(h.x+h.y,0.),h-.5*max(h.x+h.y,0.))))*sign(h.x-h.y);
+    float fill=1.-smoothstep(-.01,.025,d);
+    g=fill*.9+exp(-max(d,0.)*12.)*.45;
+    c=mix(c,vec3(1),exp(-r*r*8.)*.5);
+  } else {                       // (unused)
     g=exp(-pow((r-.82)*10.,2.))*.7*(1.-smoothstep(.95,1.,r));
   }
   float I=vCol.a;
@@ -539,7 +627,7 @@ const GOLD = [1, .8, .48], WARMW = [1, .95, .86], LAV = [.78, .68, 1], PINK = [1
 const STYLES = [
   { name: 'willow', tint: [.86, .78, 1] },
   { name: 'chrysanthemum', tint: [1, .78, .55] },
-  { name: 'bokeh', tint: [.7, 1, .88] },
+  { name: 'gold rain', tint: [1, .84, .5] },
   { name: 'frost', tint: [.74, .84, 1] },
   { name: 'feathers', tint: [1, 1, 1] },
   { name: 'confetti', tint: [1, .86, .7] },
@@ -549,6 +637,15 @@ const STYLES = [
   { name: 'cloud', tint: [.86, .86, .96] },
   { name: 'crystal', tint: [.68, 1, 1] },
   { name: 'water', tint: [.45, .78, 1] },
+  { name: 'saturn', tint: [1, .88, .66] },
+  { name: 'heart', tint: [1, .58, .7] },
+  { name: 'butterflies', tint: [.74, .82, 1] },
+  { name: 'snowflakes', tint: [.86, .95, 1] },
+  { name: 'fireflies', tint: [.82, 1, .6] },
+  { name: 'blue rain', tint: [.55, .7, 1] },
+  { name: 'galaxy', tint: [.68, .58, 1] },
+  { name: 'crackle', tint: [1, .93, .7] },
+  { name: 'purple rain', tint: [.76, .56, 1] },
 ];
 
 /* ---------------- state ---------------- */
@@ -563,6 +660,37 @@ function setStarColor(i) {
   const m = starMag[i], tint = STYLES[starStyle[i]].tint, k = .2 + .55 * m;
   starA[i * 8 + 4] = lerp(1, tint[0], k); starA[i * 8 + 5] = lerp(1, tint[1], k); starA[i * 8 + 6] = lerp(1, tint[2], k);
 }
+// give every star a style its neighbours don't have, keeping all styles evenly used
+function assignStyles() {
+  const K = STYLES.length, asp = innerWidth / innerHeight, cell = .1;
+  const gx = Math.ceil(asp / cell) + 1, gy = Math.ceil(1 / cell) + 1;
+  const grid = Array.from({ length: gx * gy }, () => []);
+  const count = new Float32Array(K);
+  const order = [...Array(N).keys()].sort((a, b) => starMag[b] - starMag[a] || rnd() - .5);
+  const w = new Float32Array(K);
+  for (const i of order) {
+    const x = starA[i * 8] * asp, y = starA[i * 8 + 1];
+    const cx0 = Math.floor(x / cell), cy0 = Math.floor(y / cell);
+    w.fill(0);
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const c = cx0 + dx, r = cy0 + dy;
+      if (c < 0 || r < 0 || c >= gx || r >= gy) continue;
+      for (const j of grid[r * gx + c]) {
+        const d = Math.hypot(starA[j * 8] * asp - x, starA[j * 8 + 1] - y);
+        if (d < cell * 1.2) w[starStyle[j]] += (.3 + starMag[j]) / (d + .015);
+      }
+    }
+    let best = 0, bw = 1e9;
+    for (let k = 0; k < K; k++) {
+      const v = w[k] + count[k] * 40 / N + rnd() * .5;
+      if (v < bw) { bw = v; best = k; }
+    }
+    starStyle[i] = best; count[best]++;
+    starA[i * 8 + 7] = best + rnd() * .99;
+    setStarColor(i);
+    grid[clamp(cy0, 0, gy - 1) * gx + clamp(cx0, 0, gx - 1)].push(i);
+  }
+}
 function makeStars() {
   const area = innerWidth * innerHeight;
   N = Math.round(clamp(area * .0015, 900, 3000));
@@ -571,14 +699,14 @@ function makeStars() {
   for (let i = 0; i < N; i++) {
     const x = rnd(), y = Math.pow(rnd(), 1.45) * .9;       // thinner towards the ground
     const m = Math.pow(rnd(), 4.2) * .82;
-    const st = (rnd() * STYLES.length) | 0;
-    starA.set([x, y, .55 + 1.9 * Math.pow(m, 1.4), m, 1, 1, 1, st + rnd() * .99], i * 8);
-    starMag[i] = m; starStyle[i] = st; setStarColor(i);
+    starA.set([x, y, .55 + 1.9 * Math.pow(m, 1.4), m, 1, 1, 1, 0], i * 8);
+    starMag[i] = m;
   }
   for (let j = 0; j < Math.round(N / 90); j++) {
     const i = (rnd() * N) | 0, m = .82 + rnd() * .18;
-    starMag[i] = m; starA[i * 8 + 3] = m; starA[i * 8 + 2] = .55 + 1.9 * Math.pow(m, 1.4); setStarColor(i);
+    starMag[i] = m; starA[i * 8 + 3] = m; starA[i * 8 + 2] = .55 + 1.9 * Math.pow(m, 1.4);
   }
+  assignStyles();
   gl.bindBuffer(gl.ARRAY_BUFFER, starBuf); gl.bufferData(gl.ARRAY_BUFFER, starA, gl.STATIC_DRAW);
   gl.bindBuffer(gl.ARRAY_BUFFER, aliveBuf); gl.bufferData(gl.ARRAY_BUFFER, alive, gl.DYNAMIC_DRAW);
 }
@@ -592,7 +720,7 @@ addEventListener('resize', resize);
 resize(); makeStars();
 
 const sx = i => starA[i * 8] * W, sy = i => starA[i * 8 + 1] * H;
-const horizonY = x => H - Math.max(hBack(x / W), hFront(x / W)) * H;
+const horizonY = x => H - duneTop(x / W) * H;
 
 /* ---------------- particles ---------------- */
 const L_SPARK = 1, L_BOUNCE = 2, L_SETTLE = 3, L_SPLASH = 4;
@@ -606,6 +734,7 @@ function add(o) {
   Object.assign(p, o); p.rot0 = p.rot;
   P.push(p); return p;
 }
+function hueRGB(h) { return [.5 + .5 * Math.cos(TAU * h), .5 + .5 * Math.cos(TAU * (h + .33)), .5 + .5 * Math.cos(TAU * (h + .67))].map(v => .6 + .4 * v); }
 function sph() { const a = rnd() * TAU, z = rnd() * 2 - 1, r = Math.sqrt(1 - z * z); return [Math.cos(a) * r, Math.sin(a) * r]; }
 function jit(c, j = .1) { return [clamp(c[0] + (rnd() - .5) * j, 0, 1.2), clamp(c[1] + (rnd() - .5) * j, 0, 1.2), clamp(c[2] + (rnd() - .5) * j, 0, 1.2)]; }
 function fling(x, y, sp, o) { const d = sph(); return add(Object.assign({ x, y, vx: d[0] * sp, vy: d[1] * sp }, o)); }
@@ -671,7 +800,22 @@ function streaks(x, y, S, n, cols, sp0, sp1, o = {}) {
   }, o));
 }
 
+function fallingFirework(x, y, S, cols, glow) {
+  const q = Math.sqrt(S);
+  flash(x, y, S, glow);
+  for (let i = 0; i < 70 * S; i++) {
+    const c = pick(cols);
+    fling(x, y, (160 + rnd() * 80) * S, { shape: 1, sz: 3.2 * q, drag: 1.4, gr: 75, life: 3.4 + rnd() * 1.2, col: c, I: 1.2,
+      trail: 60, tc: c, tw: .25, fo: 3, shrink: .4 });
+  }
+  rain(x, y, S, 110, cols);
+  glitter(x, y, S, 40, cols, 200);
+  stars5(x, y, S, 10, cols);
+}
+// one shared fall speed (px/s) per star so all its pieces come down together
+const FALL = [150, 160, 150, 130, 60, 75, 65, 320, 300, 0, 200, 260, 140, 120, 0, 65, 0, 150, 120, 150, 150];
 function explode(x, y, style, mag) {
+  const first = P.length;
   const S = (.8 + .75 * mag + rnd() * .12) * clamp(Math.min(W, H) / 820, .6, 1.35);
   const q = Math.sqrt(S);
   switch (style) {
@@ -700,21 +844,8 @@ function explode(x, y, style, mag) {
       stars5(x, y, S, 12, [GOLD, PEACH]);
       break;
     }
-    case 2: { // bokeh
-      flash(x, y, S, [.8, 1, .9]);
-      const cols = [YEL, CYAN, PINK, VIOLET, ORANGE, MINT, WARMW];
-      for (let i = 0; i < 70 * S; i++) fling(x, y, (40 + rnd() * 200) * S, { shape: 9, sz: (2.5 + Math.pow(rnd(), 2) * 9) * q, drag: 1.3,
-        gr: 70, life: 2.4 + rnd() * 1.6, col: jit(pick(cols)), I: .75, tw: .15, twF: 4, fo: 2.5 });
-      for (let i = 0; i < 5; i++) fling(x, y, (110 + rnd() * 90) * S, { shape: 1, sz: 3 * q, drag: 1.8, gr: 25, life: 2, col: WARMW, I: 1,
-        pop: .45 + rnd() * .3, popFn: (px, py) => {
-          streaks(px, py, S * .6, 26, [GOLD, WARMW, pick(cols)], 90, 140, { life: .7 + rnd() * .4, drag: 2, gr: 40, str: .06 });
-          rain(px, py, S * .5, 14, cols);
-          add({ x: px, y: py, shape: 0, sz: 14 * q, life: .25, gr: 0, col: WARMW, I: 1.2, fo: 1 });
-        } });
-      rain(x, y, S, 50, cols);
-      glitter(x, y, S, 40, cols);
-      stars5(x, y, S, 12, cols);
-      gems(x, y, S, 8, [CYAN, LILAC]);
+    case 2: { // gold rain
+      fallingFirework(x, y, S, [GOLD, WARMW, [1, .68, .32], YEL], [1, .85, .55]);
       break;
     }
     case 3: { // frost
@@ -744,11 +875,10 @@ function explode(x, y, style, mag) {
     }
     case 5: { // paper confetti with lots of sparkle
       flash(x, y, S, [1, .85, .8]);
-      papers(x, y, S, 30, [[1, .62, .72], [1, .84, .4], [.55, .85, .78], [.72, .66, 1], [.97, .95, .9], [.5, .72, 1]]);
-      rain(x, y, S, 70, [GOLD, PINK, WARMW]);
-      glitter(x, y, S, 110, [GOLD, PINK, WARMW], 260);
-      stars5(x, y, S, 18, [GOLD, PINK]);
-      gems(x, y, S, 14, [LILAC, PINK, GOLD]);
+      papers(x, y, S, 55, [[1, .62, .72], [1, .84, .4], [.55, .85, .78], [.72, .66, 1], [.97, .95, .9], [.5, .72, 1]]);
+      rain(x, y, S, 18, [GOLD, WARMW]);
+      glitter(x, y, S, 20, [GOLD, WARMW], 200);
+      stars5(x, y, S, 4, [GOLD]);
       break;
     }
     case 6: { // cherry blossom
@@ -759,9 +889,9 @@ function explode(x, y, style, mag) {
         col: pick(pinks), I: .95, fo: 6, land: L_SETTLE });
       for (let i = 0; i < 7 * S; i++) fling(x, y, (50 + rnd() * 110) * S, { shape: 6, sz: (8.5 + rnd() * 3.5) * q, drag: 2, gr: 120,
         life: 11 + rnd() * 3, rot: rnd() * TAU, spin: (rnd() - .5) * 1.5, sway: 16, swayF: 1.5, col: pick(pinks), I: .97, fo: 6, land: L_SETTLE });
-      streaks(x, y, S, 70, [GOLD, WARMW], 220, 380);
-      rain(x, y, S, 50, [GOLD, PINK, WARMW]);
-      stars5(x, y, S, 10, [PINK, GOLD]);
+      streaks(x, y, S, 18, [GOLD, WARMW], 200, 320);
+      rain(x, y, S, 14, [PINK, WARMW]);
+      stars5(x, y, S, 4, [PINK, GOLD]);
       break;
     }
     case 7: { // lego bricks
@@ -831,6 +961,109 @@ function explode(x, y, style, mag) {
       glitter(x, y, S, 30, [AQUA, WHITE]);
       break;
     }
+    case 12: { // saturn: a golden planet with a tilted ring
+      flash(x, y, S, [1, .88, .66]);
+      const tilt = (rnd() - .5) * 1.1, ct = Math.cos(tilt), st = Math.sin(tilt);
+      for (let i = 0; i < 70 * S; i++) fling(x, y, (30 + rnd() * 70) * S, { shape: rnd() < .5 ? 1 : 0, sz: (1.6 + rnd() * 2.4) * q, drag: 1.8,
+        gr: 110, life: 5 + rnd() * 2, col: jit(pick([GOLD, WARMW, PEACH])), I: 1, tw: .5, twF: 10, fo: 4, land: L_SPARK });
+      const n = Math.round(110 * S);
+      for (let i = 0; i < n; i++) {
+        const t = i / n * TAU, vx = Math.cos(t), vy = Math.sin(t) * .26, sp = (200 + rnd() * 18) * S;
+        add({ x, y, vx: (vx * ct - vy * st) * sp, vy: (vx * st + vy * ct) * sp, shape: 1, sz: 2.6 * q, drag: 1.6, gr: 70,
+          life: 5 + rnd() * 1.5, col: pick([LILAC, ICE, WARMW]), I: 1.1, trail: 10, tc: LILAC, tw: .3, fo: 4, land: L_SPARK });
+      }
+      rain(x, y, S, 36, [GOLD, LILAC]);
+      stars5(x, y, S, 8, [GOLD, WARMW]);
+      break;
+    }
+    case 13: { // heart
+      flash(x, y, S, [1, .6, .75]);
+      const n = Math.round(120 * S);
+      for (let i = 0; i < n; i++) {
+        const t = i / n * TAU, hx = 16 * Math.pow(Math.sin(t), 3), hy = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+        const k = (10.5 + rnd() * .6) * S;
+        add({ x, y, vx: hx * k, vy: -hy * k, shape: 1, sz: 2.8 * q, drag: 1.7, gr: 45, life: 4.5 + rnd(), col: pick([PINK, ROSE, WARMW]),
+          I: 1.15, trail: 12, tc: PINK, tw: .25, fo: 4, land: L_SPARK });
+      }
+      for (let i = 0; i < 12 * S; i++) fling(x, y, (40 + rnd() * 80) * S, { shape: 22, sz: (4.5 + rnd() * 3) * q, drag: 1.6, gr: 130,
+        life: 7, rot: (rnd() - .5) * .6, spin: (rnd() - .5) * 1.2, sway: 14, swayF: 2, col: pick([ROSE, PINK]), I: 1, fo: 5, land: L_SPARK });
+      rain(x, y, S, 50, [PINK, ROSE, WARMW]);
+      break;
+    }
+    case 14: { // butterflies
+      add({ x, y, shape: 0, sz: 50 * S, life: .4, gr: 0, col: [.85, .9, 1], I: .9, fo: 1 });
+      lightsArr.push({ x, y, r: 200 * S, I: .7, col: [.75, .82, 1] }); if (lightsArr.length > 4) lightsArr.shift();
+      const cols = [[.62, .78, 1], [1, .78, .45], [.82, .66, 1], [1, .72, .84], [.6, .95, .85]];
+      for (let i = 0; i < 16 * S; i++) {
+        const c = pick(cols);
+        fling(x, y, (60 + rnd() * 120) * S, { shape: 19, sz: (6 + rnd() * 3) * q, asp: .8, drag: 1.3, gr: -8, life: 7 + rnd() * 3,
+          rot: (rnd() - .5) * .5, wob: .25, tumR: 11 + rnd() * 6, sway: 26, swayF: 1.3 + rnd(), swy: 18, wx: (rnd() - .5) * 30,
+          col: c, I: .95, fin: .15, fo: 3, trail: 6, tc: c });
+      }
+      glitter(x, y, S, 60, [WARMW, LILAC, ICE]);
+      rain(x, y, S, 30, [LILAC, ICE, WARMW]);
+      stars5(x, y, S, 6, [WARMW, ICE]);
+      break;
+    }
+    case 15: { // snowflakes
+      flash(x, y, S, [.8, .9, 1]);
+      for (let i = 0; i < 40 * S; i++) fling(x, y, (60 + rnd() * 160) * S, { shape: 20, sz: (4 + rnd() * 4.5) * q, drag: 2, gr: 75 + rnd() * 25,
+        life: 12, rot: rnd() * TAU, spin: (rnd() - .5) * 1.2, sway: 16, swayF: 1.2 + rnd(), col: pick([WHITE, ICE, [.85, .95, 1]]), I: 1, fo: 6, land: L_SETTLE });
+      for (let i = 0; i < 120 * S; i++) fling(x, y, (20 + rnd() * 220) * S, { shape: 0, sz: 1 + rnd() * 1.3, drag: 1.4, gr: 40,
+        life: 3 + rnd() * 3, col: pick([WHITE, ICE]), I: .9, tw: .7, twF: 8 + rnd() * 8, fo: 3 });
+      rain(x, y, S, 36, [ICE, WHITE]);
+      gems(x, y, S, 10, [ICE, WHITE]);
+      break;
+    }
+    case 16: { // fireflies drifting and blinking down to the sand
+      add({ x, y, shape: 0, sz: 46 * S, life: .5, gr: 0, col: [.9, 1, .6], I: .8, fo: 1 });
+      lightsArr.push({ x, y, r: 220 * S, I: .7, col: [.8, 1, .5] }); if (lightsArr.length > 4) lightsArr.shift();
+      for (let i = 0; i < 55 * S; i++) fling(x, y, (40 + rnd() * 150) * S, { shape: 0, sz: (2.6 + rnd() * 2.4) * q, drag: 1.4, gr: 10 + rnd() * 10,
+        life: 9 + rnd() * 4, sway: 26, swayF: .7 + rnd() * .9, swy: 16, col: pick([[.82, 1, .42], [1, .92, .45], [.7, 1, .55]]), I: 1.1,
+        tw: .9, twF: 1.4 + rnd() * 1.8, fo: 4, land: L_SETTLE });
+      glitter(x, y, S, 30, [[.85, 1, .5], WARMW]);
+      break;
+    }
+    case 17: { // blue rain
+      fallingFirework(x, y, S, [ICE, [.38, .58, 1], WHITE, CYAN], [.55, .7, 1]);
+      break;
+    }
+    case 18: { // spiral galaxy
+      add({ x, y, shape: 0, sz: 46 * S, life: 2.4, gr: 0, col: [1, .9, .95], I: .45, fo: 2 });
+      lightsArr.push({ x, y, r: 260 * S, I: .9, col: [.7, .6, 1] }); if (lightsArr.length > 4) lightsArr.shift();
+      const rot0 = rnd() * TAU, flat = .5 + rnd() * .2, ct = Math.cos(rot0 * .3), st = Math.sin(rot0 * .3);
+      for (let i = 0; i < 240 * S; i++) {
+        const arm = i % 3, r = Math.pow(rnd(), .7), th = rot0 + arm * TAU / 3 + r * 3.6 + (rnd() - .5) * .35;
+        const vx = Math.cos(th) * r, vy = Math.sin(th) * r * flat, sp = 330 * S;
+        add({ x, y, vx: (vx * ct - vy * st) * sp, vy: (vx * st + vy * ct) * sp, shape: rnd() < .3 ? 1 : 0, sz: (1.2 + rnd() * 1.8) * q,
+          drag: 1.5, gr: 30, life: 4 + rnd() * 2, col: r < .25 ? WARMW : pick([VIOLET, LILAC, PINK, ICE]), I: 1, tw: .5, twF: 6 + rnd() * 8, fo: 3,
+          land: rnd() < .4 ? L_SPARK : 0 });
+      }
+      rain(x, y, S, 40, [VIOLET, LILAC, PINK]);
+      stars5(x, y, S, 8, [LILAC, WARMW]);
+      break;
+    }
+    case 19: { // gold crackle
+      flash(x, y, S, [1, .9, .65]);
+      for (let i = 0; i < 130 * S; i++) fling(x, y, (70 + rnd() * 200) * S, { shape: 0, sz: 1.5 * q, drag: 1.8, gr: 70, life: 3, col: GOLD, I: .9,
+        pop: .45 + rnd() * .9, popFn: (px, py) => {
+          for (let k = 0; k < 3; k++) add({ x: px + (rnd() - .5) * 12, y: py + (rnd() - .5) * 12, shape: 1, sz: 3 + rnd() * 3, life: .08 + rnd() * .1,
+            gr: 0, col: pick([WHITE, WARMW, GOLD]), I: 1.4, fo: 1 });
+          if (rnd() < .35) rain(px, py, .25, 4, [GOLD, WARMW]);
+        } });
+      rain(x, y, S, 40, [GOLD, WARMW]);
+      stars5(x, y, S, 8, [GOLD]);
+      break;
+    }
+    case 20: { // purple rain
+      fallingFirework(x, y, S, [VIOLET, LILAC, [.86, .5, 1], PINK], [.75, .55, 1]);
+      break;
+    }
+  }
+  const vt = FALL[style];
+  if (vt) for (let i = first; i < P.length; i++) {
+    const p = P[i];
+    if (p.gr > 15 && p.drag > 0) p.gr = vt * p.drag;
   }
 }
 
@@ -876,7 +1109,7 @@ function stepParticles(dt) {
     const k = Math.exp(-p.drag * dt);
     p.vx *= k; p.vy = p.vy * k + p.gr * dt;
     const ph = p.age * p.swayF + p.seed * TAU;
-    p.x += (p.vx + p.wx + p.sway * Math.sin(ph)) * dt; p.y += (p.vy + (p.wy || 0)) * dt;
+    p.x += (p.vx + p.wx + p.sway * Math.sin(ph)) * dt; p.y += (p.vy + (p.wy || 0) + (p.swy ? p.swy * Math.cos(ph * .73 + 1) : 0)) * dt;
     if (p.wob) { p.rot0 += p.spin * dt; p.rot = p.rot0 + p.wob * Math.cos(ph); }
     else p.rot += p.spin * dt;
     p.tum += p.tumR * dt;
@@ -1096,7 +1329,7 @@ let aimX = innerWidth / 2, aimY = innerHeight * .4;
 const arrows = [];
 const claimed = new Set();
 let meteorT = 3;
-const retR = () => clamp(Math.min(W, H) * .062, 40, 60);
+const retR = () => clamp(Math.min(W, H) * .042, 28, 40);
 
 function findTarget() {
   const R = retR() * 1.05;
@@ -1151,44 +1384,20 @@ const rgba = (c, a) => `rgba(${c[0] * 255 | 0},${c[1] * 255 | 0},${c[2] * 255 | 
 function drawReticle() {
   if (ret.a < .01) return;
   const R = retR() * ret.s, a = ret.a, lk = ret.lock;
-  const tc = [lerp(.9, ret.col[0], .7 * lk), lerp(.94, ret.col[1], .7 * lk), lerp(1, ret.col[2], .7 * lk)];
+  const tc = [lerp(.9, ret.col[0], .6 * lk), lerp(.94, ret.col[1], .6 * lk), lerp(1, ret.col[2], .6 * lk)];
   cx.save(); cx.translate(ret.x, ret.y);
-  // outer ring: dashed while searching, solid once locked
-  cx.strokeStyle = rgba(tc, (.35 + .55 * lk) * a); cx.lineWidth = 1 + 1.1 * lk;
-  if (lk < .5) { cx.setLineDash([4, 6]); cx.lineDashOffset = -time * 14; }
+  // one thin ring: dashed while searching, solid and tinted once locked
+  cx.strokeStyle = rgba(tc, (.3 + .5 * lk) * a); cx.lineWidth = 1 + .4 * lk;
+  if (lk < .5) { cx.setLineDash([3, 5]); cx.lineDashOffset = -time * 10; }
   cx.beginPath(); cx.arc(0, 0, R, 0, TAU); cx.stroke();
   cx.setLineDash([]);
-  // inner thin ring
-  cx.strokeStyle = rgba(tc, .22 * a); cx.lineWidth = .8;
-  cx.beginPath(); cx.arc(0, 0, R - 5, 0, TAU); cx.stroke();
-  // cross ticks
-  cx.strokeStyle = rgba(tc, (.45 + .45 * lk) * a); cx.lineWidth = 1.3;
-  for (let k = 0; k < 4; k++) {
-    const an = k * Math.PI / 2, c = Math.cos(an), s = Math.sin(an);
-    const r0 = R + 3, r1 = R + 10 - 3 * lk;
-    cx.beginPath(); cx.moveTo(c * r0, s * r0); cx.lineTo(c * r1, s * r1); cx.stroke();
-  }
-  // lock brackets close in around the ring
+  // four short ticks that close in when locked
   if (lk > .01) {
-    const br = R + 6 + (1 - lk) * 16;
-    cx.strokeStyle = rgba(tc, .95 * a * lk); cx.lineWidth = 2;
+    cx.strokeStyle = rgba(tc, .85 * a * lk); cx.lineWidth = 1.2;
+    const r0 = R + 3 + (1 - lk) * 8, r1 = r0 + 5;
     for (let k = 0; k < 4; k++) {
-      const an = Math.PI / 4 + k * Math.PI / 2;
-      cx.beginPath(); cx.arc(0, 0, br, an - .26, an + .26); cx.stroke();
-    }
-    // inward pointers
-    cx.fillStyle = rgba(tc, .9 * a * lk);
-    for (let k = 0; k < 4; k++) {
-      const an = Math.PI / 4 + k * Math.PI / 2, c = Math.cos(an), s = Math.sin(an);
-      const r0 = br + 3, r1 = br + 9;
-      cx.beginPath(); cx.moveTo(c * r0, s * r0);
-      cx.lineTo(c * r1 - s * 4, s * r1 + c * 4); cx.lineTo(c * r1 + s * 4, s * r1 - c * 4); cx.closePath(); cx.fill();
-    }
-    // one pulse ring at the moment of lock
-    if (lockT < .6 && target >= 0) {
-      const t = lockT / .6;
-      cx.strokeStyle = rgba(tc, (1 - t) * .7 * a); cx.lineWidth = 1.5;
-      cx.beginPath(); cx.arc(0, 0, R * (1 + .6 * t), 0, TAU); cx.stroke();
+      const an = k * Math.PI / 2, c = Math.cos(an), s = Math.sin(an);
+      cx.beginPath(); cx.moveTo(c * r0, s * r0); cx.lineTo(c * r1, s * r1); cx.stroke();
     }
   }
   cx.restore();
