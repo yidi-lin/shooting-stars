@@ -78,11 +78,16 @@ void main(){ vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2); gl_Position=vec4(p*2
 `#version 300 es
 precision highp float;
 uniform vec2 uRes; uniform float uDpr, uTime; uniform int uMode;
-uniform vec4 uL[4]; uniform vec3 uLC[4];
+uniform vec4 uL[4]; uniform vec3 uLC[4]; uniform vec3 uGlow;
 out vec4 o;
 ${GLSL_DUNES}
 ${GLSL_COMMON}
 vec2 h22(vec2 p){ float a=h12(p); return vec2(a,h12(p+a*17.3)); }
+float mwBand(float u,float v,vec2 q){
+  float d=((1.-v)-(.78-.62*u))*.85;           // distance to a diagonal band, lower-left to upper-right
+  float n=vnoise(q*.006)*.6+vnoise(q*.017)*.4;
+  return exp(-d*d/.018)*(.35+.9*n);
+}
 vec3 lights(vec2 q, float k){
   vec3 c=vec3(0);
   for(int i=0;i<4;i++){ vec2 d=q-uL[i].xy; c+=uLC[i]*uL[i].w*exp(-dot(d,d)/(uL[i].z*uL[i].z*k)); }
@@ -113,12 +118,12 @@ void main(){
   float u=q.x/uRes.x, v=1.-q.y/uRes.y;                               // v: 0 bottom, 1 top
   float dith=(h12(gl_FragCoord.xy)-.5)/255.;
   if(uMode==0){
-    vec3 top=vec3(.008,.014,.035), mid=vec3(.025,.06,.14), low=vec3(.08,.18,.38);
+    vec3 top=vec3(.008,.014,.035), mid=vec3(.025,.06,.14), low=vec3(.05,.12,.27);
     vec3 c=mix(low,mid,smoothstep(.06,.5,v));
     c=mix(c,top,smoothstep(.42,1.,v));
-    c+=vec3(.05,.15,.36)*exp(-pow((u-.95)*1.5,2.)-pow(v*3.,2.));
+    c+=vec3(.04,.1,.24)*exp(-pow((u-.95)*1.5,2.)-pow(v*3.,2.));
     c+=vec3(.02,.05,.11)*exp(-v*7.);
-    float thin=smoothstep(.1,.5,v);           // fewer stars near the ground
+    float thin=smoothstep(.02,.4,v)*(.55+.9*mwBand(u,v,q));   // fewer near the ground, denser in the milky way
     for(int l=0;l<2;l++){
       float cs=l==0?3.2:7.;
       vec2 cell=floor(q/cs); vec2 hh=h22(cell+float(l)*91.);
@@ -130,6 +135,12 @@ void main(){
         c+=mix(vec3(.75,.82,1.),vec3(1.,.92,.8),hh.y)*b*tw*exp(-d*d*(l==0?3.:1.6))*mix(.5,1.,thin);
       }
     }
+    float mw=mwBand(u,v,q);
+    c+=vec3(.06,.09,.17)*mw*(.4+.6*vnoise(q*.01+3.))*smoothstep(.0,.25,v);
+    vec2 gd=(q-uGlow.xy)/uGlow.z;                 // soft light behind the bow
+    float g=exp(-dot(gd,gd)*1.6), g2=exp(-dot(gd,gd)*.25);
+    c+=vec3(.8,.86,1.)*g*.2+vec3(.2,.28,.5)*g2*.1;
+    c+=vec3(.05,.09,.18)*exp(-v*14.);              // faint glow along the bottom edge
     c+=lights(q,1.)*.16;
     o=vec4(c+dith,1);
   } else {
@@ -585,8 +596,10 @@ void main(){
   c+=lit(N,V,normalize(vec3(.1,-1.,.35)),base*vec3(.24,.28,.38),shin,0.,wrap);       // dunes bounce
   c+=lit(N,V,normalize(vec3(.3,.3,-1.)),base*vec3(.3,.31,.38),shin,spec*.4,.5);                // soft fill from behind
   c+=lit(N,V,uFlDir,base*uFlCol,shin,spec*.8,wrap)+uFlCol*spec*.0;                   // firework light
+  if(m==6||m==2||m==3) c+=base*vec3(.34,.35,.38);                   // white bow: keep it reading white at night
   float rim=pow(1.-max(dot(N,V),0.),3.);
   c+=rim*vec3(.22,.32,.55)*(m==1?1.6:.8);
+  c+=rim*vec3(.75,.85,1.)*.9*smoothstep(-.3,.6,dot(N,normalize(vec3(0.,.35,1.))));   // backlight halo
   if(m==1){ vec3 R=reflect(-V,N); c+=mix(vec3(.02,.04,.09),vec3(.3,.45,.8),smoothstep(-.2,.6,R.y))*.7; }
   o=vec4(c,1);
 }`);
@@ -696,8 +709,20 @@ function makeStars() {
   N = Math.round(clamp(area * .0015, 900, 3000));
   starA = new Float32Array(N * 8); starMag = new Float32Array(N); starStyle = new Uint8Array(N);
   alive = new Float32Array(N).fill(1); respawnAt = new Float32Array(N);
+  // natural spread: patchy density, a diagonal milky-way band, a few loose clusters and quiet gaps
+  const ph = [rnd() * 9, rnd() * 9, rnd() * 9, rnd() * 9], asp = innerWidth / innerHeight;
+  const patch = (x, y) => .5 + .25 * Math.sin(x * 7.1 * asp + ph[0] + Math.sin(y * 5.3 + ph[1]) * 1.6)
+    * Math.sin(y * 6.4 + ph[2] + Math.sin(x * 4.7 * asp + ph[3]) * 1.4) + .25 * Math.sin(x * 15.3 * asp + y * 11.7 + ph[1]) * Math.sin(y * 13.1 - x * 9.2 * asp + ph[3]);
+  const clusters = Array.from({ length: 5 + (rnd() * 4 | 0) }, () => ({ x: rnd(), y: .05 + rnd() * .6, r: .02 + rnd() * .05, k: .8 + rnd() * 1.6 }));
+  const density = (x, y) => {
+    const d = (y - (.78 - .62 * x)) * .85, band = Math.exp(-d * d / .018);
+    let c = 0; for (const C of clusters) { const dx = (x - C.x) * asp, dy = y - C.y; c += C.k * Math.exp(-(dx * dx + dy * dy) / (C.r * C.r)); }
+    const ground = smooth(.99, .7, y);
+    return (Math.pow(patch(x, y), 1.6) * .9 + band * (.5 + .8 * patch(x + .3, y)) + c) * ground;
+  };
   for (let i = 0; i < N; i++) {
-    const x = rnd(), y = Math.pow(rnd(), 1.45) * .9;       // thinner towards the ground
+    let x, y;
+    do { x = rnd(); y = rnd() * .97; } while (rnd() * 2.6 > density(x, y));
     const m = Math.pow(rnd(), 4.2) * .82;
     starA.set([x, y, .55 + 1.9 * Math.pow(m, 1.4), m, 1, 1, 1, 0], i * 8);
     starMag[i] = m;
@@ -720,7 +745,7 @@ addEventListener('resize', resize);
 resize(); makeStars();
 
 const sx = i => starA[i * 8] * W, sy = i => starA[i * 8 + 1] * H;
-const horizonY = x => H - duneTop(x / W) * H;
+const horizonY = x => H - 2;                     // no dunes: the screen's bottom edge is the ground
 
 /* ---------------- particles ---------------- */
 const L_SPARK = 1, L_BOUNCE = 2, L_SETTLE = 3, L_SPLASH = 4;
@@ -1126,7 +1151,7 @@ function stepParticles(dt) {
     if (p.land) {
       if (!p.fg) {
         const hy = horizonY(p.x);
-        if (p.y > hy) { p.fg = 1; p.landY = hy + Math.pow(rnd(), 1.7) * (H - hy) * .6 + 2; }
+        if (p.y > hy - 6) { p.fg = 1; p.landY = H - 1 - Math.pow(rnd(), 2) * 5; }
       } else if (p.y >= p.landY && p.vy > 0) {
         if (landed(p)) { P[i] = P[P.length - 1]; P.pop(); }
       }
@@ -1211,9 +1236,9 @@ function frames(C, n) {   // for each point: A = n (given), B = in-plane perpend
   }
   return [A, B];
 }
-const IVORY = [.86, .84, .78], IVORY_D = [.66, .64, .58], WRAP = [.78, .76, .7], TUFT = [.05, .045, .045];
-const STRING = [.9, .89, .85], SHAFT = [.84, .82, .76], STEEL = [.8, .8, .78];
-const FEATHER = [.93, .91, .86];
+const IVORY = [.97, .97, .96], IVORY_D = [.84, .85, .87], WRAP = [.92, .92, .91], TUFT = [.95, .95, .97];
+const STRING = [.96, .96, .96], SHAFT = [.95, .95, .94], STEEL = [.88, .89, .91];
+const FEATHER = [.98, .98, .98];
 const ARROW_LEN = .62, BRACE = .17, DRAW_LEN = .34;
 
 function buildArrow(Nk, f, up, scale = 1) {
@@ -1316,7 +1341,7 @@ function bowAim(G, x, y) {
   return { f, face };
 }
 function gripPos() {
-  const z = 1.75, yScreen = H - Math.min(W, H) * .25;
+  const z = 2.15, yScreen = H - Math.min(W, H) * .2;
   return [0, -(yScreen - H / 2) / F * z, z];
 }
 
@@ -1504,6 +1529,7 @@ function frame(now) {
   gl.useProgram(skyProg);
   gl.uniform2f(skyProg.u.uRes, W, H); gl.uniform1f(skyProg.u.uDpr, DPR); gl.uniform1f(skyProg.u.uTime, time);
   gl.uniform4fv(skyProg.u.uL, Lbuf); gl.uniform3fv(skyProg.u.uLC, LCbuf);
+  { const G = gripPos(), p = proj(G); gl.uniform3f(skyProg.u.uGlow, p[0], p[1] - Math.min(W, H) * .02, Math.min(W, H) * .2); }
   gl.uniform1i(skyProg.u.uMode, 0);
   gl.bindVertexArray(quadVAO); gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -1517,8 +1543,6 @@ function frame(now) {
 
   drawParticles(0);
 
-  gl.useProgram(skyProg); gl.uniform1i(skyProg.u.uMode, 1);
-  gl.bindVertexArray(quadVAO); gl.drawArrays(gl.TRIANGLES, 0, 3);
 
   drawParticles(1);
 
